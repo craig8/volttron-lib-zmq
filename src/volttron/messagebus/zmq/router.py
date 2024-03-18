@@ -8,10 +8,13 @@ from urllib.parse import urlparse
 import zmq
 #from volttron.services.routing import RoutingService
 from volttron.server.monitor import Monitor
-from volttron.types import PeerNotifier
-from volttron.utils import deserialize_frames, jsonapi, serialize_frames
-from volttron.utils.logs import FramesFormatter
+from volttron.types.peer import ServicePeerNotifier
+#from volttron.types import PeerNotifier
+from volttron.utils import jsonapi
+from volttron.utils.logs import FramesFormatter, logtrace
 from zmq import NOBLOCK, ZMQError
+
+from volttron.zmq import deserialize_frames, frame_serialization
 
 from .base_router import ERROR, INCOMING, UNROUTABLE, BaseRouter
 from .pubsub import PubSubService
@@ -24,6 +27,7 @@ from .socket import Address
 # from ..server import __version__
 
 _log = logging.getLogger(__name__)
+zmq.Context.instance()    # DO NOT REMOVE LINE!!
 
 
 class Router(BaseRouter):
@@ -31,6 +35,7 @@ class Router(BaseRouter):
 
     def __init__(
         self,
+        *,
         local_address,
         addresses=(),
         context=None,
@@ -44,7 +49,7 @@ class Router(BaseRouter):
         external_address_file="",
         msgdebug=None,
         agent_monitor_frequency=600,
-        service_notifier: Optional[PeerNotifier] = None,
+        service_notifier: Optional[ServicePeerNotifier] = None,
     ):
 
         super(Router, self).__init__(
@@ -72,13 +77,14 @@ class Router(BaseRouter):
         self._message_debugger_socket = None
         self._agent_monitor_frequency = agent_monitor_frequency
 
+    @logtrace
     def setup(self):
         sock = self.socket
         identity = str(uuid.uuid4())
         sock.identity = identity.encode("utf-8")
         _log.debug("ROUTER SOCK identity: {}".format(sock.identity))
-        if self._monitor:
-            Monitor(sock.get_monitor_socket()).start()
+        #if self._monitor:
+        Monitor(sock.get_monitor_socket()).start()
         sock.bind("inproc://vip")
         _log.debug("In-process VIP router bound to inproc://vip")
         # sock.zap_domain = b"vip"
@@ -99,8 +105,7 @@ class Router(BaseRouter):
         for address in self.addresses:
             if not address.identity:
                 address.identity = identity
-            if (address.secretkey is None and address.server not in ["NULL", "PLAIN"]
-                    and self._secretkey):
+            if (address.secretkey is None and address.server not in ["NULL", "PLAIN"] and self._secretkey):
                 address.server = "CURVE"
                 address.secretkey = self._secretkey
             if not address.domain:
@@ -117,7 +122,7 @@ class Router(BaseRouter):
         #     self._addr,
         #     self._instance_name,
         # )
-        #
+
         self.pubsub = PubSubService(self.socket, self._protected_topics, self._ext_routing)
         # self.ext_rpc = ExternalRPCService(self.socket, self._ext_routing)
         self._poller.register(sock, zmq.POLLIN)
@@ -144,14 +149,12 @@ class Router(BaseRouter):
                 # Initialize a ZMQ IPC socket on which to publish all messages to MessageDebuggerAgent.
                 socket_path = os.path.expandvars("$VOLTTRON_HOME/run/messagedebug")
                 socket_path = os.path.expanduser(socket_path)
-                socket_path = ("ipc://{}".format("@" if sys.platform.startswith("linux") else "") +
-                               socket_path)
+                socket_path = ("ipc://{}".format("@" if sys.platform.startswith("linux") else "") + socket_path)
                 self._message_debugger_socket = zmq.Context().socket(zmq.PUB)
                 self._message_debugger_socket.connect(socket_path)
             # Publish the routed message, including the "topic" (status/direction), for use by MessageDebuggerAgent.
             frame_bytes = [topic]
-            frame_bytes.extend(
-                frames)    # [frame if type(frame) is bytes else frame.bytes for frame in frames])
+            frame_bytes.extend(frames)    # [frame if type(frame) is bytes else frame.bytes for frame in frames])
             frame_bytes = serialize_frames(frames)
             # TODO we need to fix the msgdebugger socket if we need it to be connected
             # frame_bytes = [f.bytes for f in frame_bytes]
@@ -193,8 +196,7 @@ class Router(BaseRouter):
 
                 _log.debug("ROUTER received agent stop message. dropping peer: {}".format(drop))
             except IndexError:
-                _log.error(
-                    f"agentstop called but unable to determine agent from frames sent {frames}")
+                _log.error(f"agentstop called but unable to determine agent from frames sent {frames}")
             return False
         elif subsystem == "query":
             try:
@@ -244,37 +246,51 @@ class Router(BaseRouter):
             result = self.ext_rpc.handle_subsystem(frames)
             return result
 
+    @logtrace
     def _drop_pubsub_peers(self, peer):
+        _log.debug(f"Dropping pubsub peer: {peer}")
         self.pubsub.peer_drop(peer)
 
+    @logtrace
     def _add_pubsub_peers(self, peer):
+        _log.debug(f"Adding pubsub peer: {peer}")
         self.pubsub.peer_add(peer)
 
+    @logtrace
     def poll_sockets(self):
         """
         Poll for incoming messages through router socket or other external socket connections
         """
+        #try:
+        _log.debug("Polling sockets.")
         try:
-            _log.debug("Polling sockets.")
             sockets = dict(self._poller.poll())
-        except ZMQError as ex:
-            _log.error("ZMQ Error while polling: {}".format(ex))
+        except Exception as ex:
+            _log.error(ex)
+        # except ZMQError as ex:
+        #     _log.error("ZMQ Error while polling: {}".format(ex))
 
         for sock in sockets:
             if sock == self.socket:
                 if sockets[sock] == zmq.POLLIN:
+                    _log.debug(f"### Internal socket {sock} setting up to receive")
                     frames = sock.recv_multipart(copy=False)
-                    _log.debug(f"Frames are: {deserialize_frames(frames)}")
+                    _log.debug(f"### Internal socket {sock} received {deserialize_frames(frames)}")
                     self.route(deserialize_frames(frames))
+                    _log.debug(f"### After route")
             elif sock in self._ext_routing._vip_sockets:
                 if sockets[sock] == zmq.POLLIN:
                     # _log.debug("From Ext Socket: ")
+                    _log.debug(f"??? {sock} pollin for external socket")
                     self.ext_route(sock)
             elif sock in self._ext_routing._monitor_sockets:
+                _log.debug(f"??? {sock} Handle monitor external event.")
                 self._ext_routing.handle_monitor_event(sock)
             else:
                 # _log.debug("External ")
+                _log.debug(f"???? {sock} setting up to receive")
                 frames = sock.recv_multipart(copy=False)
+                _log.debug(f"???? {sock} received frames")
 
     def ext_route(self, socket):
         """

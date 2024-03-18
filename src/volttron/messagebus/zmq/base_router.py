@@ -36,16 +36,20 @@
 # under Contract DE-AC05-76RL01830
 # }}}
 
-import os
 import logging
+import os
+from abc import ABC, abstractmethod
 from typing import Optional
 
+import zmq
 import zmq.green as zmq
-# import zmq
-from zmq import NOBLOCK, ZMQError, EINVAL, EHOSTUNREACH
+from volttron.types.peer import ServicePeerNotifier
+from volttron.utils.logs import logtrace
+# # import zmq
+from zmq import EHOSTUNREACH, EINVAL, NOBLOCK, ZMQError
 
-from volttron.server.servicepeer import ServicePeerNotifier
-from volttron.utils.frame_serialization import serialize_frames
+#from volttron.server.servicepeer import ServicePeerNotifier
+from volttron.zmq import serialize_frames
 
 __all__ = ["BaseRouter", "OUTGOING", "INCOMING", "UNROUTABLE", "ERROR"]
 
@@ -70,7 +74,7 @@ _INVALID_SUBSYSTEM = (
 )
 
 
-class BaseRouter(object):
+class BaseRouter(ABC):
     """Abstract base class of VIP router implementation.
 
     Router implementers should inherit this class and implement the
@@ -133,14 +137,14 @@ class BaseRouter(object):
         sock.tcp_keepalive_cnt = 6
         self.context.set(zmq.MAX_SOCKETS, 30690)
         sock.set_hwm(6000)
-        _log.debug("ROUTER SENDBUF: {0}, {1}".format(sock.getsockopt(zmq.SNDBUF),
-                                                     sock.getsockopt(zmq.RCVBUF)))
+        _log.debug("ROUTER SENDBUF: {0}, {1}".format(sock.getsockopt(zmq.SNDBUF), sock.getsockopt(zmq.RCVBUF)))
         self.setup()
 
     def stop(self, linger=1):
         """Close the socket."""
         self.socket.close(linger)
 
+    @abstractmethod
     def setup(self):
         """Called from start() method to setup the socket.
 
@@ -161,6 +165,7 @@ class BaseRouter(object):
         """Returns the underlying socket's poll method."""
         return self.socket.poll
 
+    @abstractmethod
     def handle_subsystem(self, frames, user_id):
         """Handle additional subsystems and provide a response.
 
@@ -182,11 +187,13 @@ class BaseRouter(object):
         """
         pass
 
+    @abstractmethod
     def issue(self, topic, frames, extra=None):
         pass
 
     if zmq.zmq_version_info() >= (4, 1, 0):
 
+        @logtrace
         def lookup_user_id(self, sender, recipient, auth_token):
             """Find and return a user identity.
 
@@ -224,16 +231,18 @@ class BaseRouter(object):
         # _log.debug(f"_distribute {parts}")
         for peer in self._peers:
             frames[0] = peer
-            drop.update(self._send(frames))
+            drop.update(self._send_response(frames))
         for peer in drop:
             self._drop_peer(peer)
             if self._service_notifier:
                 self._service_notifier.peer_dropped(peer)
 
+    @abstractmethod
     def _drop_pubsub_peers(self, peer):
         """Drop peers for pubsub subsystem. To be handled by subclasses"""
         pass
 
+    @abstractmethod
     def _add_pubsub_peers(self, peer):
         """Add peers for pubsub subsystem. To be handled by subclasses"""
         pass
@@ -256,6 +265,7 @@ class BaseRouter(object):
         self._distribute(b"peerlist", b"drop", peer)
         self._drop_pubsub_peers(peer)
 
+    @logtrace
     def route(self, frames):
         """Route one message and return.
 
@@ -269,7 +279,6 @@ class BaseRouter(object):
         issue = self.issue
 
         issue(INCOMING, frames)
-        _log.debug(f"ROUTER Receiving frames: {frames}")
         if len(frames) < 6:
             # Cannot route if there are insufficient frames, such as
             # might happen with a router probe.
@@ -357,10 +366,18 @@ class BaseRouter(object):
         else:
             # Route all other requests to the recipient
             frames[:4] = [recipient, sender, proto, user_id]
-        for peer in self._send(frames):
+        for peer in self._send_response(frames):
             self._drop_peer(peer)
 
-    def _send(self, frames):
+    def _send_response(self, frames):
+        """
+        Send frames to a recipient and handle errors.
+
+        :param frames: _description_
+        :type frames: _type_
+        :return: _description_
+        :rtype: _type_
+        """
         issue = self.issue
         socket = self.socket
         drop = []
@@ -368,6 +385,7 @@ class BaseRouter(object):
         # Expecting outgoing frames:
         #   [RECIPIENT, SENDER, PROTO, USER_ID, MSG_ID, SUBSYS, ...]
         try:
+
             # Try sending the message to its recipient
             # This is a zmq socket so we need to serialize it before sending
             serialized_frames = serialize_frames(frames)

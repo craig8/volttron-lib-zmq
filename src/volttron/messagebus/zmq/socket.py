@@ -54,11 +54,15 @@ import urllib.parse
 import urllib.request
 import uuid
 from contextlib import contextmanager
+from typing import Any, Optional
 
 import zmq.green as zmq
-#from volttron.platform.curve import encode_key, decode_key
-from volttron.utils.frame_serialization import (deserialize_frames, serialize_frames)
+from volttron.types import Message
+from volttron.utils.logs import logtrace
 from zmq import (DEALER, NOBLOCK, RCVMORE, ROUTER, SNDMORE, ZMQError, curve_keypair)
+
+from volttron.zmq import deserialize_frames, serialize_frames
+from volttron.zmq.utils import decode_key, encode_key
 
 __all__ = ["Address", "ProtocolError", "Message", "nonblocking"]
 
@@ -245,18 +249,18 @@ class ProtocolError(Exception):
     pass
 
 
-class Message(object):
-    """Message object returned form Socket.recv_vip_object()."""
+# class Message(object):
+#     """Message object returned form Socket.recv_vip_object()."""
 
-    def __init__(self, **kwargs):
-        self.__dict__ = kwargs
+#     def __init__(self, **kwargs):
+#         self.__dict__ = kwargs
 
-    def __repr__(self):
-        attrs = ", ".join("%r: %r" % (
-            name,
-            [x for x in value] if isinstance(value, (list, tuple)) else value,
-        ) for name, value in self.__dict__.items())
-        return "%s(**{%s})" % (self.__class__.__name__, attrs)
+#     def __repr__(self):
+#         attrs = ", ".join("%r: %r" % (
+#             name,
+#             [x for x in value] if isinstance(value, (list, tuple)) else value,
+#         ) for name, value in self.__dict__.items())
+#         return "%s(**{%s})" % (self.__class__.__name__, attrs)
 
 
 class _Socket(object):
@@ -329,11 +333,11 @@ class _Socket(object):
             super(_Socket, self).send("")
 
     @contextmanager
-    def _sending(self, flags):
+    def _sending(self, flags: int):
         flags |= getattr(self._Socket__local, "flags", 0)
         yield flags
 
-    def send(self, frame, flags=0, copy=True, track=False):
+    def send(self, frame: zmq.Frame, flags: int = 0, copy: bool = True, track: bool = False):
         """Send a single frame while enforcing VIP protocol.
 
         Expects frames to be sent in the following order:
@@ -378,7 +382,8 @@ class _Socket(object):
                 self._send_state = state
                 raise
 
-    def send_multipart(self, msg_parts, flags=0, copy=True, track=False):
+    @logtrace
+    def send_multipart(self, msg_parts: list[Any], flags: int = 0, copy: bool = True, track: bool = False):
         parts = serialize_frames(msg_parts)
         _log.debug("Sending parts on multiparts: {}".format(parts))
         with self._sending(flags) as flags:
@@ -386,15 +391,15 @@ class _Socket(object):
 
     def send_vip(
         self,
-        peer,
-        subsystem,
-        args=None,
-        msg_id="",
-        user="",
-        via=None,
-        flags=0,
-        copy=True,
-        track=False,
+        peer: str,
+        subsystem: str,
+        args: Optional[Any] = None,
+        msg_id: str = "",
+        user: str = "",
+        via: Optional[str] = None,
+        flags: int = 0,
+        copy: bool = True,
+        track: bool = False,
     ):
         """Send an entire VIP multipartmessage by individual parts.
 
@@ -422,9 +427,8 @@ class _Socket(object):
         peer = peer
         msg_id = msg_id
 
-        _log.debug(
-            "SEND VIP: peer={}, subsystem={}, args={}, msg_id={}, user={}, type(msg_id)={}".format(
-                peer, subsystem, args, msg_id, user, type(msg_id)))
+        _log.debug("--- SEND VIP: peer={}, subsystem={}, args={}, msg_id={}, user={}, type(msg_id)={}".format(
+            peer, subsystem, args, msg_id, user, type(msg_id)))
         with self._sending(flags) as flags:
             state = self._send_state
             if state > 0:
@@ -449,24 +453,21 @@ class _Socket(object):
                 send = (self.send if isinstance(args, (bytes, str)) else self.send_multipart)
                 send(args, flags=flags, copy=copy, track=track)
 
-    def send_vip_dict(self, dct, flags=0, copy=True, track=False):
-        """Send VIP message from a dictionary."""
-        msg_id = dct.pop("id", "")
-        self.send_vip(flags=flags, copy=copy, track=track, msg_id=msg_id, **dct)
-
-    def send_vip_object(self, msg, flags=0, copy=True, track=False):
+    def send_vip_object(self, msg: Message, flags: int = 0, copy: bool = True, track: bool = False):
         """Send VIP message from an object."""
+        assert isinstance(msg, Message)
         dct = {
             "via": getattr(msg, "via", None),
             "peer": msg.peer,
             "subsystem": msg.subsystem,
-            "user": getattr(msg, "user", ""),
-            "msg_id": getattr(msg, "id", ""),
+            "user": msg.user,
+            "msg_id": msg.msg_id,
             "args": getattr(msg, "args", None),
         }
+        _log.debug(f"!!! _socket.send_vip_object {dct}")
         self.send_vip(flags=flags, copy=copy, track=track, **dct)
 
-    def recv(self, flags=0, copy=True, track=False):
+    def recv(self, flags=0, copy=True, track=False) -> zmq.Frame:
         """Receive and return a single frame while enforcing VIP protocol.
 
         Expects frames to be received in the following order:
@@ -497,8 +498,7 @@ class _Socket(object):
             state += 1
             self._recv_state = state
             if proto != b"VIP1":
-                raise ProtocolError("invalid protocol: {!r}{}".format(
-                    proto[:30], "..." if len(proto) > 30 else ""))
+                raise ProtocolError("invalid protocol: {!r}{}".format(proto[:30], "..." if len(proto) > 30 else ""))
         result = super(_Socket, self).recv(flags=flags, copy=copy, track=track)
         if not self.getsockopt(RCVMORE):
             # Ensure SUBSYSTEM is received
@@ -507,6 +507,8 @@ class _Socket(object):
             self._recv_state = -1 if self.type == ROUTER else 0
         elif state < 5:
             self._recv_state = state + 1
+
+        _log.debug(f"!!! _socket.recv: {result}")
         return result
 
     def reset_recv(self):
@@ -520,7 +522,7 @@ class _Socket(object):
         while self.getsockopt(RCVMORE):
             super(_Socket, self).recv()
 
-    def recv_vip(self, flags=0, copy=True, track=False):
+    def recv_vip(self, flags=0, copy=True, track=False) -> Message:
         """Receive a complete VIP message and return as a list.
 
         The list includes frames in the following order:
@@ -543,27 +545,25 @@ class _Socket(object):
         idx = 4 - state
         result = message[:idx]
         result.append(message[idx:])
+        _log.debug(f"$$$ _socket.recv_vip: {result}")
         return result
 
-    def recv_vip_dict(self, flags=0, copy=True, track=False):
-        """Receive a complete VIP message and return in a dict."""
+    def recv_vip_object(self, flags: int = 0, copy: bool = True, track: bool = False) -> Message:
+        """Recieve a complete VIP message and return as an object."""
         state = self._recv_state
         frames = self.recv_vip(flags=flags, copy=copy, track=track)
         via = frames.pop(0) if state == -1 else None
+        decoded = deserialize_frames(frames=frames)
+        _log.debug(f"@@@ Received object: {decoded}")
+        return decoded
         # from volttron.utils.frame_serialization import decode_frames
         # decoded = decode_frames(frames)
 
         myframes = deserialize_frames(frames)
-        dct = dict(zip(("peer", "user", "id", "subsystem", "args"), myframes))
+        dct = dict(zip(("peer", "user", "msg_id", "subsystem", "args"), myframes))
         if via is not None:
             dct["via"] = via
-        return dct
-
-    def recv_vip_object(self, flags=0, copy=True, track=False):
-        """Recieve a complete VIP message and return as an object."""
-        msg = Message()
-        msg.__dict__ = self.recv_vip_dict(flags=flags, copy=copy, track=track)
-        return msg
+        return Message(**dct)
 
     def bind(self, addr):
         """Extended zmq.Socket.bind() to include options in addr."""

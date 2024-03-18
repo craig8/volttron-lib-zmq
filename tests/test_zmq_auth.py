@@ -1,5 +1,4 @@
-from volttron.zmq.auth import ZMQCredentials
+# from volttron.zmq.auth import ZMQCredentials
 
-
-def test_zmq_credentials():
-    
+# def test_zmq_credentials():
+#     pass

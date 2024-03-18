@@ -40,17 +40,16 @@ import logging
 import logging.config
 import os
 import re
-
-import zmq
-from zmq import EHOSTUNREACH, ZMQError, EAGAIN, NOBLOCK
-from zmq import green
 from collections import defaultdict
 
+import zmq
 # Create a context common to the green and non-green zmq modules.
 from volttron.utils import ClientContext as cc
 from volttron.utils import jsonapi
 from volttron.utils.jsonrpc import INVALID_REQUEST, UNAUTHORIZED
-from volttron.utils.frame_serialization import serialize_frames
+from zmq import EAGAIN, EHOSTUNREACH, NOBLOCK, ZMQError, green
+
+from volttron.zmq import serialize_frames
 
 green.Context._instance = green.Context.shadow(zmq.Context.instance().underlying)
 from volttron.client.vip.agent.subsystems.pubsub import ProtectedPubSubTopics
@@ -126,8 +125,7 @@ class PubSubService:
 
     def external_platform_drop(self, instance_name):
         if instance_name in self._ext_subscriptions:
-            self._logger.debug(
-                "PUBSUBSERVICE dropping external subscriptions for {}".format(instance_name))
+            self._logger.debug("PUBSUBSERVICE dropping external subscriptions for {}".format(instance_name))
             del self._ext_subscriptions[instance_name]
 
     def _sync(self, peer, items):
@@ -141,7 +139,8 @@ class PubSubService:
         """
         # self._logger.debug("SYNC before: {0}, {1}".format(peer, items))
         items = {(platform, bus, prefix)
-                 for platform, buses in items.items() for bus, topics in buses.items()
+                 for platform, buses in items.items()
+                 for bus, topics in buses.items()
                  for prefix in topics}
         # self._logger.debug("SYNC after: {}".format(items))
         remove = []
@@ -613,8 +612,7 @@ class PubSubService:
                 msg = frames[7]
                 self._user_capabilities = msg["capabilities"]
             except KeyError as exc:
-                self._logger.error(
-                    "Missing key in update auth capabilities message {}".format(exc))
+                self._logger.error("Missing key in update auth capabilities message {}".format(exc))
             except ValueError:
                 pass
 
@@ -712,8 +710,7 @@ class PubSubService:
             elif op == "request_response":
                 pass
             else:
-                self._logger.error("PUBSUBSERVICE Unknown pubsub request {}".format(
-                    op.decode("utf-8")))
+                self._logger.error("PUBSUBSERVICE Unknown pubsub request {}".format(op.decode("utf-8")))
                 pass
 
         if result is not None:
@@ -813,13 +810,11 @@ class PubSubService:
                     prefixes = msg[instance_name]
                     # Store external subscription list for later use (during publish)
                     self._ext_subscriptions[instance_name] = prefixes
-                    self._logger.debug(
-                        "PUBSUBSERVICE New external list from {0}: List: {1}".format(
-                            instance_name, self._ext_subscriptions))
+                    self._logger.debug("PUBSUBSERVICE New external list from {0}: List: {1}".format(
+                        instance_name, self._ext_subscriptions))
                     if self._rabbitmq_agent:
                         for prefix in prefixes:
-                            self._rabbitmq_agent.vip.pubsub.subscribe(
-                                "pubsub", prefix, self.publish_callback)
+                            self._rabbitmq_agent.vip.pubsub.subscribe("pubsub", prefix, self.publish_callback)
             except KeyError as exc:
                 self._logger.error("Unknown external instance name: {}".format(instance_name))
                 return False
@@ -943,11 +938,7 @@ class PubSubService:
         except ValueError:
             self._logger.error("JSON decode error. Invalid character")
         if self._rabbitmq_agent:
-            self._rabbitmq_agent.vip.pubsub.publish("pubsub",
-                                                    topic,
-                                                    msg["headers"],
-                                                    msg["message"],
-                                                    bus=bus)
+            self._rabbitmq_agent.vip.pubsub.publish("pubsub", topic, msg["headers"], msg["message"], bus=bus)
 
 
 class ProtectedPubSubTopics(object):
